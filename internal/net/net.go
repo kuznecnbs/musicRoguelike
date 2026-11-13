@@ -15,7 +15,7 @@ import (
 )
 
 // DefaultRelayAddr is the default relay server address used when none is specified.
-const DefaultRelayAddr = "127.0.0.1:7778"
+const DefaultRelayAddr = "212.116.234.17:7778"
 
 // Server runs on the Host machine, accepting a co-op client connection over TCP (with SetNoDelay(true)),
 // either directly or via a Relay server, receiving Player 2 inputs at 30 Hz and broadcasting WorldSnapshots at 30 Hz.
