@@ -1,0 +1,39 @@
+# macOS
+.DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows / Linux
+Thumbs.db
+Desktop.ini
+*~
+
+# Go binaries, build artifacts & test/coverage outputs
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.prof
+coverage.txt
+/bin/
+/build/
+/dist/
+/soundcheck
+/game
+
+# Editors & IDEs
+.idea/
+.vscode/
+.zed/
+*.swp
+*.swo
+
+# Environment & logs
+.env
+.env.*
+*.log
