@@ -4,18 +4,27 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"soundcheck/internal/core"
 	"soundcheck/internal/net"
+	"soundcheck/internal/relay"
 	"soundcheck/internal/render"
 )
+
+type roomsFetchResult struct {
+	rooms []relay.RoomInfo
+	err   error
+}
 
 type GameApp struct {
 	mode      string
 	port      int
 	addr      string
+	useRelay  bool
+	roomCode  string
 	tickCount uint64
 
 	// Состояние хоста
@@ -27,8 +36,8 @@ type GameApp struct {
 
 	// Стартовое меню выбора режима (если не задан -mode)
 	inMenu    bool
-	addrInput string
-	menuErr   string
+	menu      render.MenuState
+	roomsChan chan roomsFetchResult
 
 	// Общий рендерер и последний снапшот
 	renderer   *render.Renderer
@@ -37,33 +46,71 @@ type GameApp struct {
 	netStatus  string
 }
 
-func NewGameApp(mode string, port int, addr string, showMenu bool) (*GameApp, error) {
+func NewGameApp(mode string, port int, addr string, relayAddr string, code string, public bool, showMenu bool) (*GameApp, error) {
+	if relayAddr == "" {
+		relayAddr = net.DefaultRelayAddr
+	}
 	app := &GameApp{
 		mode:      mode,
 		port:      port,
 		addr:      addr,
-		addrInput: addr,
 		inMenu:    showMenu,
+		roomsChan: make(chan roomsFetchResult, 4),
 		renderer:  render.NewRenderer(),
+		menu: render.MenuState{
+			RelayAddr:   relayAddr,
+			RoomCode:    strings.ToUpper(strings.TrimSpace(code)),
+			DirectAddr:  addr,
+			Port:        port,
+			PublicRoom:  public,
+			ActiveField: render.MenuFieldRoomCode,
+		},
 	}
 
 	if showMenu {
+		app.refreshRooms()
 		return app, nil
 	}
 
 	if mode == "host" {
-		if err := app.startHost(); err != nil {
-			return nil, err
+		if code != "" || relayAddr != net.DefaultRelayAddr {
+			if err := app.startRelayHost(); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := app.startDirectHost(); err != nil {
+				return nil, err
+			}
 		}
 	} else {
-		app.startClient(addr)
+		if code != "" {
+			app.startRelayClient(relayAddr, code)
+		} else {
+			app.startDirectClient(addr)
+		}
 	}
 
 	return app, nil
 }
 
-func (g *GameApp) startHost() error {
+func (g *GameApp) refreshRooms() {
+	if g.menu.LoadingList {
+		return
+	}
+	target := strings.TrimSpace(g.menu.RelayAddr)
+	if target == "" {
+		return
+	}
+	g.menu.LoadingList = true
+	go func() {
+		rooms, err := net.FetchPublicRooms(target)
+		g.roomsChan <- roomsFetchResult{rooms: rooms, err: err}
+	}()
+}
+
+func (g *GameApp) startDirectHost() error {
 	g.mode = "host"
+	g.useRelay = false
 	g.world = core.NewWorld()
 	g.server = net.NewServer(g.port, g.world)
 	if err := g.server.Start(); err != nil {
@@ -71,23 +118,83 @@ func (g *GameApp) startHost() error {
 	}
 	g.netStatus = g.formatHostStatus(false)
 	g.inMenu = false
-	g.menuErr = ""
+	g.menu.ErrMsg = ""
 	g.updateWindowTitle()
 	return nil
 }
 
-func (g *GameApp) startClient(addr string) {
+func (g *GameApp) startRelayHost() error {
+	relayAddr := strings.TrimSpace(g.menu.RelayAddr)
+	if relayAddr == "" {
+		relayAddr = net.DefaultRelayAddr
+	}
+	g.mode = "host"
+	g.useRelay = true
+	g.world = core.NewWorld()
+	g.server = net.NewServer(g.port, g.world)
+	roomName := "Soundcheck 19:59"
+	code, err := g.server.StartRelay(relayAddr, g.menu.PublicRoom, roomName)
+	if err != nil {
+		return err
+	}
+	g.roomCode = code
+	g.netStatus = g.formatHostStatus(false)
+	g.inMenu = false
+	g.menu.ErrMsg = ""
+	g.updateWindowTitle()
+	return nil
+}
+
+func (g *GameApp) startDirectClient(addr string) {
 	g.mode = "join"
+	g.useRelay = false
 	g.addr = addr
 	g.client = net.NewClient(addr)
 	g.client.Start()
 	g.netStatus = g.formatClientStatus(false, "")
 	g.inMenu = false
-	g.menuErr = ""
+	g.menu.ErrMsg = ""
+	g.updateWindowTitle()
+}
+
+func (g *GameApp) startRelayClient(relayAddr, code string) {
+	g.mode = "join"
+	g.useRelay = true
+	g.roomCode = strings.ToUpper(strings.TrimSpace(code))
+	g.addr = relayAddr
+	g.client = net.NewRelayClient(relayAddr, g.roomCode)
+	g.client.Start()
+	g.netStatus = g.formatClientStatus(false, "")
+	g.inMenu = false
+	g.menu.ErrMsg = ""
 	g.updateWindowTitle()
 }
 
 func (g *GameApp) formatHostStatus(p2Connected bool) string {
+	if g.useRelay {
+		code := g.server.RelayCode()
+		if code == "" {
+			code = g.roomCode
+		}
+		vis := "ЗАКР"
+		if g.menu.PublicRoom {
+			vis = "ОТКР"
+		}
+		if g.renderer.Lang() == core.LangEN {
+			vis = "PRIVATE"
+			if g.menu.PublicRoom {
+				vis = "PUBLIC"
+			}
+			if p2Connected {
+				return fmt.Sprintf("RELAY CODE: %s — PLAYER 2 CONNECTED", code)
+			}
+			return fmt.Sprintf("RELAY CODE: %s (%s) — WAITING FOR PLAYER 2", code, vis)
+		}
+		if p2Connected {
+			return fmt.Sprintf("RELAY КОД: %s — ИГРОК 2 ПОДКЛЮЧЁН", code)
+		}
+		return fmt.Sprintf("RELAY КОД: %s (%s) — ОЖИДАНИЕ ИГРОКА 2", code, vis)
+	}
 	if g.renderer.Lang() == core.LangEN {
 		if p2Connected {
 			return fmt.Sprintf("HOST (:%d) — PLAYER 2 CONNECTED", g.port)
@@ -101,22 +208,26 @@ func (g *GameApp) formatHostStatus(p2Connected bool) string {
 }
 
 func (g *GameApp) formatClientStatus(connected bool, errStr string) string {
+	target := g.addr
+	if g.useRelay {
+		target = "RELAY [" + g.roomCode + "]"
+	}
 	if g.renderer.Lang() == core.LangEN {
 		if connected {
-			return fmt.Sprintf("CLIENT CONNECTED TO %s", g.addr)
+			return fmt.Sprintf("CLIENT CONNECTED TO %s", target)
 		}
 		if errStr != "" {
-			return fmt.Sprintf("RECONNECTING TO %s (%s)", g.addr, errStr)
+			return fmt.Sprintf("RECONNECTING TO %s (%s)", target, errStr)
 		}
-		return fmt.Sprintf("CONNECTING TO %s...", g.addr)
+		return fmt.Sprintf("CONNECTING TO %s...", target)
 	}
 	if connected {
-		return fmt.Sprintf("КЛИЕНТ ПОДКЛЮЧЁН К %s", g.addr)
+		return fmt.Sprintf("КЛИЕНТ ПОДКЛЮЧЁН К %s", target)
 	}
 	if errStr != "" {
-		return fmt.Sprintf("ПЕРЕПОДКЛЮЧЕНИЕ К %s (%s)", g.addr, errStr)
+		return fmt.Sprintf("ПЕРЕПОДКЛЮЧЕНИЕ К %s (%s)", target, errStr)
 	}
-	return fmt.Sprintf("ПОДКЛЮЧЕНИЕ К %s...", g.addr)
+	return fmt.Sprintf("ПОДКЛЮЧЕНИЕ К %s...", target)
 }
 
 func (g *GameApp) updateWindowTitle() {
@@ -193,27 +304,90 @@ func (g *GameApp) Update() error {
 	}
 
 	if g.inMenu {
-		for _, r := range ebiten.AppendInputChars(nil) {
-			if r >= 32 && r != 127 && len(g.addrInput) < 48 {
-				g.addrInput += string(r)
+		select {
+		case res := <-g.roomsChan:
+			g.menu.LoadingList = false
+			if res.err != nil {
+				g.menu.Rooms = nil
+				g.menu.ErrMsg = res.err.Error()
+			} else {
+				g.menu.Rooms = res.rooms
+				g.menu.ErrMsg = ""
+			}
+		default:
+		}
+
+		// Ввод текста в активное поле
+		var target *string
+		maxLen := 64
+		upper := false
+		switch g.menu.ActiveField {
+		case render.MenuFieldRelayAddr:
+			target = &g.menu.RelayAddr
+		case render.MenuFieldRoomCode:
+			target = &g.menu.RoomCode
+			maxLen = 10
+			upper = true
+		case render.MenuFieldDirectAddr:
+			target = &g.menu.DirectAddr
+		}
+		if target != nil {
+			for _, r := range ebiten.AppendInputChars(nil) {
+				if r >= 32 && r != 127 && len(*target) < maxLen {
+					ch := string(r)
+					if upper {
+						ch = strings.ToUpper(ch)
+					}
+					*target += ch
+				}
+			}
+			bsDur := inpututil.KeyPressDuration(ebiten.KeyBackspace)
+			if (bsDur == 1 || (bsDur > 18 && bsDur%3 == 0)) && len(*target) > 0 {
+				runes := []rune(*target)
+				*target = string(runes[:len(runes)-1])
 			}
 		}
-		if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) && len(g.addrInput) > 0 {
-			runes := []rune(g.addrInput)
-			g.addrInput = string(runes[:len(runes)-1])
-		}
+
 		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
-			switch g.renderer.HandleModeSelectClick(localInput.CursorX, localInput.CursorY) {
-			case render.ModeActionHost:
-				if err := g.startHost(); err != nil {
-					g.menuErr = err.Error()
+			action, roomCode := g.renderer.HandleModeSelectClick(localInput.CursorX, localInput.CursorY, g.menu.Rooms)
+			switch action {
+			case render.ModeActionFocusRelay:
+				g.menu.ActiveField = render.MenuFieldRelayAddr
+			case render.ModeActionFocusCode:
+				g.menu.ActiveField = render.MenuFieldRoomCode
+			case render.ModeActionFocusDirect:
+				g.menu.ActiveField = render.MenuFieldDirectAddr
+			case render.ModeActionToggleVisibility:
+				g.menu.PublicRoom = !g.menu.PublicRoom
+			case render.ModeActionRefreshRooms:
+				g.refreshRooms()
+			case render.ModeActionHostRelay:
+				if err := g.startRelayHost(); err != nil {
+					g.menu.ErrMsg = err.Error()
 				}
-			case render.ModeActionJoin:
-				target := g.addrInput
-				if target == "" {
-					target = g.addr
+			case render.ModeActionHostDirect:
+				if err := g.startDirectHost(); err != nil {
+					g.menu.ErrMsg = err.Error()
 				}
-				g.startClient(target)
+			case render.ModeActionJoinCode:
+				code := strings.TrimSpace(g.menu.RoomCode)
+				if code == "" {
+					if g.renderer.Lang() == core.LangEN {
+						g.menu.ErrMsg = "Enter a room code first"
+					} else {
+						g.menu.ErrMsg = "Сначала введите код комнаты"
+					}
+				} else {
+					g.startRelayClient(g.menu.RelayAddr, code)
+				}
+			case render.ModeActionJoinPublicRoom:
+				g.startRelayClient(g.menu.RelayAddr, roomCode)
+			case render.ModeActionJoinDirect:
+				targetAddr := strings.TrimSpace(g.menu.DirectAddr)
+				if targetAddr == "" {
+					targetAddr = g.addr
+				}
+				g.startDirectClient(targetAddr)
 			}
 		}
 		return nil
@@ -253,7 +427,7 @@ func (g *GameApp) Update() error {
 
 func (g *GameApp) Draw(screen *ebiten.Image) {
 	if g.inMenu {
-		g.renderer.DrawModeSelect(screen, g.addrInput, g.port, g.menuErr)
+		g.renderer.DrawModeSelect(screen, g.menu)
 		return
 	}
 	if !g.hasSnap {
@@ -275,7 +449,10 @@ func (g *GameApp) Layout(outsideWidth, outsideHeight int) (int, int) {
 func main() {
 	mode := flag.String("mode", "host", "Сетевой режим: 'host' (хост) или 'join' (клиент)")
 	port := flag.Int("port", 7777, "Порт для прослушивания в режиме хоста")
-	addr := flag.String("addr", "127.0.0.1:7777", "Адрес хоста для подключения в режиме клиента")
+	addr := flag.String("addr", "127.0.0.1:7777", "Адрес хоста для прямого подключения в режиме клиента")
+	relayAddr := flag.String("relay", net.DefaultRelayAddr, "Адрес relay-сервера (host:port)")
+	code := flag.String("code", "", "Код комнаты relay для быстрого подключения")
+	public := flag.Bool("public", true, "Публиковать ли комнату в списке открытых комнат relay")
 	flag.Parse()
 
 	modeExplicit := false
@@ -285,7 +462,7 @@ func main() {
 		}
 	})
 
-	app, err := NewGameApp(*mode, *port, *addr, !modeExplicit)
+	app, err := NewGameApp(*mode, *port, *addr, *relayAddr, *code, *public, !modeExplicit)
 	if err != nil {
 		log.Fatalf("Ошибка инициализации: %v", err)
 	}

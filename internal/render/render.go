@@ -14,6 +14,7 @@ import (
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/goregular"
 	"soundcheck/internal/core"
+	"soundcheck/internal/relay"
 )
 
 type Renderer struct {
@@ -169,114 +170,294 @@ func (r *Renderer) PlaySounds(events []core.SoundEvent) {
 	}
 }
 
+type MenuField int
+
+const (
+	MenuFieldNone MenuField = iota
+	MenuFieldRelayAddr
+	MenuFieldRoomCode
+	MenuFieldDirectAddr
+)
+
 type ModeSelectAction int
 
 const (
 	ModeActionNone ModeSelectAction = iota
-	ModeActionHost
-	ModeActionJoin
+	ModeActionHostRelay
+	ModeActionHostDirect
+	ModeActionToggleVisibility
+	ModeActionJoinCode
+	ModeActionJoinDirect
+	ModeActionRefreshRooms
+	ModeActionJoinPublicRoom
+	ModeActionFocusRelay
+	ModeActionFocusCode
+	ModeActionFocusDirect
 )
 
+type MenuState struct {
+	RelayAddr   string
+	RoomCode    string
+	DirectAddr  string
+	Port        int
+	PublicRoom  bool
+	ActiveField MenuField
+	Rooms       []relay.RoomInfo
+	LoadingList bool
+	ErrMsg      string
+}
+
 const (
-	menuBtnW = float32(460)
-	menuBtnX = float32(core.ArenaWidth/2) - menuBtnW*0.5
-	hostBtnY = float32(250)
-	hostBtnH = float32(64)
-	addrBoxY = float32(365)
-	addrBoxH = float32(42)
-	joinBtnY = float32(425)
-	joinBtnH = float32(64)
+	// Relay server input row
+	relayBoxX = float32(430)
+	relayBoxY = float32(106)
+	relayBoxW = float32(470)
+	relayBoxH = float32(34)
+
+	// Left Host panel
+	hostPanelX = float32(64)
+	panelY     = float32(162)
+	panelW     = float32(556)
+	panelH     = float32(458)
+
+	visBtnX       = float32(96)
+	visBtnY       = float32(252)
+	panelInnerW   = float32(492)
+	visBtnH       = float32(42)
+	hostRelayBtnY = float32(308)
+	hostBtnH      = float32(60)
+	hostDirBtnY   = float32(474)
+
+	// Right Join panel
+	joinPanelX = float32(660)
+	joinInnerX = float32(692)
+	codeBoxY   = float32(236)
+	codeBoxW   = float32(226)
+	inputH     = float32(40)
+	joinCodeX  = float32(930)
+	joinCodeW  = float32(254)
+
+	refreshBtnX = float32(1044)
+	refreshBtnY = float32(294)
+	refreshBtnW = float32(140)
+	refreshBtnH = float32(28)
+
+	roomsListY = float32(330)
+	roomRowH   = float32(35)
+	maxRoomRow = 4
+
+	directBoxY  = float32(516)
+	directBoxW  = float32(276)
+	joinDirBtnX = float32(980)
+	joinDirBtnW = float32(204)
 )
 
 func pointInRect(x, y float64, rx, ry, rw, rh float32) bool {
 	return x >= float64(rx) && x <= float64(rx+rw) && y >= float64(ry) && y <= float64(ry+rh)
 }
 
-func (r *Renderer) HandleModeSelectClick(x, y float64) ModeSelectAction {
-	if pointInRect(x, y, menuBtnX, hostBtnY, menuBtnW, hostBtnH) {
-		return ModeActionHost
+// HandleModeSelectClick returns the clicked UI action and (for public room rows) the room code.
+func (r *Renderer) HandleModeSelectClick(x, y float64, rooms []relay.RoomInfo) (ModeSelectAction, string) {
+	if pointInRect(x, y, relayBoxX, relayBoxY, relayBoxW, relayBoxH) {
+		return ModeActionFocusRelay, ""
 	}
-	if pointInRect(x, y, menuBtnX, joinBtnY, menuBtnW, joinBtnH) {
-		return ModeActionJoin
+	if pointInRect(x, y, visBtnX, visBtnY, panelInnerW, visBtnH) {
+		return ModeActionToggleVisibility, ""
 	}
-	return ModeActionNone
+	if pointInRect(x, y, visBtnX, hostRelayBtnY, panelInnerW, hostBtnH) {
+		return ModeActionHostRelay, ""
+	}
+	if pointInRect(x, y, visBtnX, hostDirBtnY, panelInnerW, hostBtnH) {
+		return ModeActionHostDirect, ""
+	}
+	if pointInRect(x, y, joinInnerX, codeBoxY, codeBoxW, inputH) {
+		return ModeActionFocusCode, ""
+	}
+	if pointInRect(x, y, joinCodeX, codeBoxY, joinCodeW, inputH) {
+		return ModeActionJoinCode, ""
+	}
+	if pointInRect(x, y, refreshBtnX, refreshBtnY, refreshBtnW, refreshBtnH) {
+		return ModeActionRefreshRooms, ""
+	}
+	for i := 0; i < len(rooms) && i < maxRoomRow; i++ {
+		ry := roomsListY + float32(i)*(roomRowH+4)
+		if pointInRect(x, y, joinInnerX, ry, panelInnerW, roomRowH) {
+			return ModeActionJoinPublicRoom, rooms[i].Code
+		}
+	}
+	if pointInRect(x, y, joinInnerX, directBoxY, directBoxW, inputH) {
+		return ModeActionFocusDirect, ""
+	}
+	if pointInRect(x, y, joinDirBtnX, directBoxY, joinDirBtnW, inputH) {
+		return ModeActionJoinDirect, ""
+	}
+	return ModeActionNone, ""
 }
 
-func (r *Renderer) DrawModeSelect(screen *ebiten.Image, addrInput string, port int, errMsg string) {
-	screen.Fill(color.RGBA{16, 16, 24, 255})
+func (r *Renderer) drawInputBox(screen *ebiten.Image, x, y, w, h float32, textVal string, active bool, placeholder string) {
+	borderCol := color.RGBA{95, 110, 145, 255}
+	fillCol := color.RGBA{20, 22, 34, 255}
+	if active {
+		borderCol = color.RGBA{110, 210, 255, 255}
+		fillCol = color.RGBA{26, 32, 50, 255}
+	}
+	vector.DrawFilledRect(screen, x, y, w, h, fillCol, false)
+	vector.StrokeRect(screen, x, y, w, h, 2.0, borderCol, false)
 
-	// Декоративная рамка сцены
+	display := textVal
+	col := color.RGBA{255, 240, 160, 255}
+	if active {
+		display += "_"
+	} else if display == "" {
+		display = placeholder
+		col = color.RGBA{120, 130, 155, 220}
+	}
+	r.drawText(screen, display, float64(x)+12, float64(y)+float64(h)*0.5-7, r.faceNormal, col)
+}
+
+func (r *Renderer) drawMenuButton(screen *ebiten.Image, x, y, w, h float32, cx, cy int, fill, hoverFill, border, hoverBorder color.RGBA, title, subtitle string) {
+	hovered := pointInRect(float64(cx), float64(cy), x, y, w, h)
+	fCol := fill
+	bCol := border
+	if hovered {
+		fCol = hoverFill
+		bCol = hoverBorder
+	}
+	vector.DrawFilledRect(screen, x, y, w, h, fCol, false)
+	vector.StrokeRect(screen, x, y, w, h, 2.0, bCol, false)
+
+	if subtitle == "" {
+		r.drawTextCentered(screen, title, float64(x+w*0.5), float64(y+h*0.5)-8, r.faceTitle, color.RGBA{240, 248, 255, 255})
+	} else {
+		r.drawTextCentered(screen, title, float64(x+w*0.5), float64(y)+10, r.faceTitle, color.RGBA{240, 248, 255, 255})
+		r.drawTextCentered(screen, subtitle, float64(x+w*0.5), float64(y)+34, r.faceSmall, color.RGBA{185, 210, 235, 255})
+	}
+}
+
+func (r *Renderer) DrawModeSelect(screen *ebiten.Image, st MenuState) {
+	screen.Fill(color.RGBA{16, 16, 24, 255})
 	vector.StrokeRect(screen, 16, 16, core.ArenaWidth-32, core.ArenaHeight-32, 2.0, color.RGBA{55, 65, 95, 255}, false)
 
 	r.drawTextCentered(
 		screen,
 		r.tr("САУНДЧЕК В 19:59", "SOUNDCHECK AT 19:59"),
-		core.ArenaWidth/2, 115, r.faceHeading, color.RGBA{90, 215, 255, 255},
+		core.ArenaWidth/2, 28, r.faceHeading, color.RGBA{90, 215, 255, 255},
 	)
 	r.drawTextCentered(
 		screen,
 		r.tr("Кооперативный музыкальный рогалик (1–2 игрока)", "Co-op Music Roguelike (1–2 Players)"),
-		core.ArenaWidth/2, 152, r.faceNormal, color.RGBA{200, 210, 235, 255},
+		core.ArenaWidth/2, 58, r.faceNormal, color.RGBA{200, 210, 235, 255},
 	)
+
+	// Строка адреса Relay
+	r.drawText(screen, r.tr("Relay сервер:", "Relay server:"), float64(relayBoxX)-120, float64(relayBoxY)+10, r.faceNormal, color.RGBA{190, 205, 235, 255})
+	r.drawInputBox(screen, relayBoxX, relayBoxY, relayBoxW, relayBoxH, st.RelayAddr, st.ActiveField == MenuFieldRelayAddr, "host:port")
 
 	cx, cy := ebiten.CursorPosition()
 
-	// Кнопка ХОСТ
-	hostFill := color.RGBA{26, 36, 56, 255}
-	hostBorder := color.RGBA{75, 195, 255, 255}
-	if pointInRect(float64(cx), float64(cy), menuBtnX, hostBtnY, menuBtnW, hostBtnH) {
-		hostFill = color.RGBA{38, 56, 86, 255}
-		hostBorder = color.RGBA{145, 225, 255, 255}
+	// === ЛЕВАЯ ПАНЕЛЬ: ХОСТ ===
+	vector.DrawFilledRect(screen, hostPanelX, panelY, panelW, panelH, color.RGBA{20, 24, 38, 240}, false)
+	vector.StrokeRect(screen, hostPanelX, panelY, panelW, panelH, 2.0, color.RGBA{75, 165, 225, 220}, false)
+	r.drawTextCentered(screen, r.tr("СОЗДАТЬ ИГРУ (ХОСТ)", "HOST GAME"), float64(hostPanelX+panelW*0.5), float64(panelY)+18, r.faceHeading, color.RGBA{100, 210, 255, 255})
+
+	r.drawText(screen, r.tr("1. Через Relay (по коду комнаты):", "1. Via Relay (Room Code):"), float64(visBtnX), float64(panelY)+60, r.faceTitle, color.RGBA{215, 225, 245, 255})
+
+	visTitle := r.tr("ТИП: ЗАКРЫТАЯ КОМНАТА (только по коду)", "VISIBILITY: PRIVATE ROOM (code only)")
+	visFill := color.RGBA{34, 30, 52, 255}
+	visHover := color.RGBA{48, 42, 74, 255}
+	visBorder := color.RGBA{175, 130, 255, 255}
+	if st.PublicRoom {
+		visTitle = r.tr("ТИП: ОТКРЫТАЯ КОМНАТА (видна в списке)", "VISIBILITY: PUBLIC ROOM (listed)")
+		visFill = color.RGBA{26, 44, 48, 255}
+		visHover = color.RGBA{36, 62, 68, 255}
+		visBorder = color.RGBA{95, 225, 210, 255}
 	}
-	vector.DrawFilledRect(screen, menuBtnX, hostBtnY, menuBtnW, hostBtnH, hostFill, false)
-	vector.StrokeRect(screen, menuBtnX, hostBtnY, menuBtnW, hostBtnH, 2.5, hostBorder, false)
-	r.drawTextCentered(
-		screen,
-		r.tr("СОЗДАТЬ ИГРУ (ХОСТ)", "HOST GAME"),
-		core.ArenaWidth/2, float64(hostBtnY)+12, r.faceTitle, color.RGBA{240, 248, 255, 255},
-	)
-	r.drawTextCentered(
-		screen,
-		fmt.Sprintf(r.tr("Соло или кооператив • Порт :%d", "Solo or Co-op • Port :%d"), port),
-		core.ArenaWidth/2, float64(hostBtnY)+37, r.faceSmall, color.RGBA{175, 205, 235, 255},
+	r.drawMenuButton(screen, visBtnX, visBtnY, panelInnerW, visBtnH, cx, cy, visFill, visHover, visBorder, color.RGBA{200, 240, 255, 255}, visTitle, "")
+
+	r.drawMenuButton(
+		screen, visBtnX, hostRelayBtnY, panelInnerW, hostBtnH, cx, cy,
+		color.RGBA{26, 42, 68, 255}, color.RGBA{38, 62, 98, 255},
+		color.RGBA{85, 195, 255, 255}, color.RGBA{155, 230, 255, 255},
+		r.tr("ХОСТИТЬ ЧЕРЕЗ RELAY", "HOST VIA RELAY"),
+		r.tr("Выдаст 5-значный код комнаты для напарника", "Generates a 5-char room code for your partner"),
 	)
 
-	// Поле ввода адреса хоста
-	r.drawTextCentered(
-		screen,
-		r.tr("Адрес хоста (IP:PORT) для подключения:", "Host address (IP:PORT) to join:"),
-		core.ArenaWidth/2, float64(addrBoxY)-22, r.faceSmall, color.RGBA{185, 195, 220, 255},
-	)
-	vector.DrawFilledRect(screen, menuBtnX, addrBoxY, menuBtnW, addrBoxH, color.RGBA{22, 24, 36, 255}, false)
-	vector.StrokeRect(screen, menuBtnX, addrBoxY, menuBtnW, addrBoxH, 1.5, color.RGBA{105, 120, 160, 255}, false)
-	r.drawTextCentered(
-		screen,
-		addrInput+"_",
-		core.ArenaWidth/2, float64(addrBoxY)+12, r.faceNormal, color.RGBA{255, 240, 160, 255},
+	vector.StrokeLine(screen, visBtnX, 405, visBtnX+panelInnerW, 405, 1.0, color.RGBA{65, 75, 105, 200}, false)
+	r.drawText(screen, r.tr("2. Прямой коннект (IP:Port):", "2. Direct Connect (IP:Port):"), float64(visBtnX), 426, r.faceTitle, color.RGBA{215, 225, 245, 255})
+
+	r.drawMenuButton(
+		screen, visBtnX, hostDirBtnY, panelInnerW, hostBtnH, cx, cy,
+		color.RGBA{26, 36, 52, 255}, color.RGBA{38, 52, 76, 255},
+		color.RGBA{115, 155, 210, 255}, color.RGBA{170, 205, 255, 255},
+		r.tr("ПРЯМОЙ ХОСТ (IP:PORT)", "DIRECT HOST (IP:PORT)"),
+		fmt.Sprintf(r.tr("Слушать TCP порт :%d напрямую", "Listen directly on TCP port :%d"), st.Port),
 	)
 
-	// Кнопка ПОДКЛЮЧИТЬСЯ
-	joinFill := color.RGBA{26, 44, 36, 255}
-	joinBorder := color.RGBA{85, 235, 145, 255}
-	if pointInRect(float64(cx), float64(cy), menuBtnX, joinBtnY, menuBtnW, joinBtnH) {
-		joinFill = color.RGBA{38, 66, 52, 255}
-		joinBorder = color.RGBA{145, 255, 190, 255}
+	// === ПРАВАЯ ПАНЕЛЬ: КЛИЕНТ ===
+	vector.DrawFilledRect(screen, joinPanelX, panelY, panelW, panelH, color.RGBA{20, 24, 38, 240}, false)
+	vector.StrokeRect(screen, joinPanelX, panelY, panelW, panelH, 2.0, color.RGBA{85, 215, 145, 220}, false)
+	r.drawTextCentered(screen, r.tr("ПОДКЛЮЧИТЬСЯ (КЛИЕНТ)", "JOIN GAME (CLIENT)"), float64(joinPanelX+panelW*0.5), float64(panelY)+18, r.faceHeading, color.RGBA{100, 245, 165, 255})
+
+	r.drawText(screen, r.tr("1. По коду комнаты (Relay):", "1. By Room Code (Relay):"), float64(joinInnerX), float64(panelY)+52, r.faceTitle, color.RGBA{215, 225, 245, 255})
+	r.drawInputBox(screen, joinInnerX, codeBoxY, codeBoxW, inputH, st.RoomCode, st.ActiveField == MenuFieldRoomCode, r.tr("КОД...", "CODE..."))
+	r.drawMenuButton(
+		screen, joinCodeX, codeBoxY, joinCodeW, inputH, cx, cy,
+		color.RGBA{26, 54, 42, 255}, color.RGBA{38, 78, 60, 255},
+		color.RGBA{85, 235, 145, 255}, color.RGBA{155, 255, 195, 255},
+		r.tr("ВОЙТИ ПО КОДУ", "JOIN BY CODE"), "",
+	)
+
+	r.drawText(screen, r.tr("2. Открытые комнаты:", "2. Public Rooms:"), float64(joinInnerX), float64(refreshBtnY)+5, r.faceTitle, color.RGBA{215, 225, 245, 255})
+	refreshLabel := r.tr("ОБНОВИТЬ", "REFRESH")
+	if st.LoadingList {
+		refreshLabel = "..."
 	}
-	vector.DrawFilledRect(screen, menuBtnX, joinBtnY, menuBtnW, joinBtnH, joinFill, false)
-	vector.StrokeRect(screen, menuBtnX, joinBtnY, menuBtnW, joinBtnH, 2.5, joinBorder, false)
-	r.drawTextCentered(
-		screen,
-		r.tr("ПОДКЛЮЧИТЬСЯ К ИГРЕ (КЛИЕНТ)", "JOIN GAME (CLIENT)"),
-		core.ArenaWidth/2, float64(joinBtnY)+12, r.faceTitle, color.RGBA{240, 255, 245, 255},
-	)
-	r.drawTextCentered(
-		screen,
-		r.tr("Введите IP друга выше и нажмите сюда", "Enter friend's IP above and click here"),
-		core.ArenaWidth/2, float64(joinBtnY)+37, r.faceSmall, color.RGBA{175, 225, 195, 255},
+	r.drawMenuButton(
+		screen, refreshBtnX, refreshBtnY, refreshBtnW, refreshBtnH, cx, cy,
+		color.RGBA{30, 38, 58, 255}, color.RGBA{45, 58, 88, 255},
+		color.RGBA{105, 160, 235, 255}, color.RGBA{160, 210, 255, 255},
+		refreshLabel, "",
 	)
 
-	if errMsg != "" {
-		r.drawTextCentered(screen, errMsg, core.ArenaWidth/2, 520, r.faceNormal, color.RGBA{255, 95, 110, 255})
+	// Список открытых комнат
+	vector.DrawFilledRect(screen, joinInnerX, roomsListY, panelInnerW, 158, color.RGBA{14, 16, 26, 240}, false)
+	vector.StrokeRect(screen, joinInnerX, roomsListY, panelInnerW, 158, 1.5, color.RGBA{65, 78, 110, 255}, false)
+	if len(st.Rooms) == 0 {
+		r.drawTextCentered(
+			screen,
+			r.tr("Нет открытых комнат (нажмите ОБНОВИТЬ)", "No public rooms (click REFRESH)"),
+			float64(joinInnerX+panelInnerW*0.5), float64(roomsListY)+68, r.faceNormal, color.RGBA{145, 155, 185, 230},
+		)
+	} else {
+		for i := 0; i < len(st.Rooms) && i < maxRoomRow; i++ {
+			rm := st.Rooms[i]
+			ry := roomsListY + 4 + float32(i)*(roomRowH+4)
+			r.drawMenuButton(
+				screen, joinInnerX+4, ry, panelInnerW-8, roomRowH, cx, cy,
+				color.RGBA{26, 36, 52, 255}, color.RGBA{38, 58, 82, 255},
+				color.RGBA{85, 195, 230, 220}, color.RGBA{150, 235, 255, 255},
+				fmt.Sprintf("[%s]  %s", rm.Code, rm.Name), "",
+			)
+		}
+	}
+
+	r.drawText(screen, r.tr("3. Прямой коннект (IP:Port):", "3. Direct Connect (IP:Port):"), float64(joinInnerX), 494, r.faceTitle, color.RGBA{215, 225, 245, 255})
+	r.drawInputBox(screen, joinInnerX, directBoxY, directBoxW, inputH, st.DirectAddr, st.ActiveField == MenuFieldDirectAddr, "127.0.0.1:7777")
+	r.drawMenuButton(
+		screen, joinDirBtnX, directBoxY, joinDirBtnW, inputH, cx, cy,
+		color.RGBA{28, 46, 38, 255}, color.RGBA{42, 68, 56, 255},
+		color.RGBA{110, 210, 155, 255}, color.RGBA{165, 245, 200, 255},
+		r.tr("ВОЙТИ ПО IP", "DIRECT JOIN"), "",
+	)
+
+	if st.ErrMsg != "" {
+		r.drawTextCentered(screen, st.ErrMsg, core.ArenaWidth/2, 648, r.faceNormal, color.RGBA{255, 95, 110, 255})
+	} else {
+		r.drawTextCentered(
+			screen,
+			r.tr("Кликните на любое поле ввода, чтобы отредактировать адрес или код комнаты", "Click any input box to edit the address or room code"),
+			core.ArenaWidth/2, 648, r.faceSmall, color.RGBA{150, 165, 195, 230},
+		)
 	}
 
 	r.drawLangButton(screen)

@@ -76,24 +76,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libgl1-mesa-dev xorg-dev libasound2-dev
 
-      - name: Build binary
+      - name: Build binaries
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
           mkdir -p dist
           go build -trimpath -ldflags="-s -w" -o "dist/soundcheck-${{ matrix.name }}${{ matrix.ext }}" ./cmd/game
+          go build -trimpath -ldflags="-s -w" -o "dist/soundcheck-relay-${{ matrix.name }}${{ matrix.ext }}" ./cmd/relay
 
       - name: Package (tar.gz)
         if: runner.os != 'Windows'
         run: |
           tar -czf "soundcheck-${{ matrix.name }}.tar.gz" -C dist "soundcheck-${{ matrix.name }}${{ matrix.ext }}"
+          tar -czf "soundcheck-relay-${{ matrix.name }}.tar.gz" -C dist "soundcheck-relay-${{ matrix.name }}${{ matrix.ext }}"
 
       - name: Package (zip)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Compress-Archive -Path "dist/soundcheck-${{ matrix.name }}${{ matrix.ext }}" -DestinationPath "soundcheck-${{ matrix.name }}.zip"
+          Compress-Archive -Path "dist/soundcheck-relay-${{ matrix.name }}${{ matrix.ext }}" -DestinationPath "soundcheck-relay-${{ matrix.name }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -101,7 +104,9 @@ jobs:
           name: release-${{ matrix.name }}
           path: |
             soundcheck-${{ matrix.name }}.tar.gz
+            soundcheck-relay-${{ matrix.name }}.tar.gz
             soundcheck-${{ matrix.name }}.zip
+            soundcheck-relay-${{ matrix.name }}.zip
           if-no-files-found: ignore
 
   release:
