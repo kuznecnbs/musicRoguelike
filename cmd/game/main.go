@@ -25,6 +25,11 @@ type GameApp struct {
 	// Состояние клиента
 	client *net.Client
 
+	// Стартовое меню выбора режима (если не задан -mode)
+	inMenu    bool
+	addrInput string
+	menuErr   string
+
 	// Общий рендерер и последний снапшот
 	renderer   *render.Renderer
 	latestSnap core.WorldSnapshot
@@ -32,28 +37,54 @@ type GameApp struct {
 	netStatus  string
 }
 
-func NewGameApp(mode string, port int, addr string) (*GameApp, error) {
+func NewGameApp(mode string, port int, addr string, showMenu bool) (*GameApp, error) {
 	app := &GameApp{
-		mode:     mode,
-		port:     port,
-		addr:     addr,
-		renderer: render.NewRenderer(),
+		mode:      mode,
+		port:      port,
+		addr:      addr,
+		addrInput: addr,
+		inMenu:    showMenu,
+		renderer:  render.NewRenderer(),
+	}
+
+	if showMenu {
+		return app, nil
 	}
 
 	if mode == "host" {
-		app.world = core.NewWorld()
-		app.server = net.NewServer(port, app.world)
-		if err := app.server.Start(); err != nil {
-			return nil, fmt.Errorf("не удалось запустить сервер на порту %d: %w", port, err)
+		if err := app.startHost(); err != nil {
+			return nil, err
 		}
-		app.netStatus = app.formatHostStatus(false)
 	} else {
-		app.client = net.NewClient(addr)
-		app.client.Start()
-		app.netStatus = app.formatClientStatus(false, "")
+		app.startClient(addr)
 	}
 
 	return app, nil
+}
+
+func (g *GameApp) startHost() error {
+	g.mode = "host"
+	g.world = core.NewWorld()
+	g.server = net.NewServer(g.port, g.world)
+	if err := g.server.Start(); err != nil {
+		return fmt.Errorf("не удалось запустить сервер на порту %d: %w", g.port, err)
+	}
+	g.netStatus = g.formatHostStatus(false)
+	g.inMenu = false
+	g.menuErr = ""
+	g.updateWindowTitle()
+	return nil
+}
+
+func (g *GameApp) startClient(addr string) {
+	g.mode = "join"
+	g.addr = addr
+	g.client = net.NewClient(addr)
+	g.client.Start()
+	g.netStatus = g.formatClientStatus(false, "")
+	g.inMenu = false
+	g.menuErr = ""
+	g.updateWindowTitle()
 }
 
 func (g *GameApp) formatHostStatus(p2Connected bool) string {
@@ -161,6 +192,33 @@ func (g *GameApp) Update() error {
 		localInput.Primary = false
 	}
 
+	if g.inMenu {
+		for _, r := range ebiten.AppendInputChars(nil) {
+			if r >= 32 && r != 127 && len(g.addrInput) < 48 {
+				g.addrInput += string(r)
+			}
+		}
+		if inpututil.IsKeyJustPressed(ebiten.KeyBackspace) && len(g.addrInput) > 0 {
+			runes := []rune(g.addrInput)
+			g.addrInput = string(runes[:len(runes)-1])
+		}
+		if inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) {
+			switch g.renderer.HandleModeSelectClick(localInput.CursorX, localInput.CursorY) {
+			case render.ModeActionHost:
+				if err := g.startHost(); err != nil {
+					g.menuErr = err.Error()
+				}
+			case render.ModeActionJoin:
+				target := g.addrInput
+				if target == "" {
+					target = g.addr
+				}
+				g.startClient(target)
+			}
+		}
+		return nil
+	}
+
 	if g.mode == "host" {
 		// Хост обновляет ввод Игрока 0 и крутит авторитетную симуляцию на 60 TPS
 		g.world.SetInput(0, localInput)
@@ -194,6 +252,10 @@ func (g *GameApp) Update() error {
 }
 
 func (g *GameApp) Draw(screen *ebiten.Image) {
+	if g.inMenu {
+		g.renderer.DrawModeSelect(screen, g.addrInput, g.port, g.menuErr)
+		return
+	}
 	if !g.hasSnap {
 		g.renderer.DrawConnecting(screen, g.netStatus)
 		return
@@ -216,7 +278,14 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:7777", "Адрес хоста для подключения в режиме клиента")
 	flag.Parse()
 
-	app, err := NewGameApp(*mode, *port, *addr)
+	modeExplicit := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "mode" {
+			modeExplicit = true
+		}
+	})
+
+	app, err := NewGameApp(*mode, *port, *addr, !modeExplicit)
 	if err != nil {
 		log.Fatalf("Ошибка инициализации: %v", err)
 	}

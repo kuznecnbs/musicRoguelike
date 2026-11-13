@@ -169,6 +169,119 @@ func (r *Renderer) PlaySounds(events []core.SoundEvent) {
 	}
 }
 
+type ModeSelectAction int
+
+const (
+	ModeActionNone ModeSelectAction = iota
+	ModeActionHost
+	ModeActionJoin
+)
+
+const (
+	menuBtnW = float32(460)
+	menuBtnX = float32(core.ArenaWidth/2) - menuBtnW*0.5
+	hostBtnY = float32(250)
+	hostBtnH = float32(64)
+	addrBoxY = float32(365)
+	addrBoxH = float32(42)
+	joinBtnY = float32(425)
+	joinBtnH = float32(64)
+)
+
+func pointInRect(x, y float64, rx, ry, rw, rh float32) bool {
+	return x >= float64(rx) && x <= float64(rx+rw) && y >= float64(ry) && y <= float64(ry+rh)
+}
+
+func (r *Renderer) HandleModeSelectClick(x, y float64) ModeSelectAction {
+	if pointInRect(x, y, menuBtnX, hostBtnY, menuBtnW, hostBtnH) {
+		return ModeActionHost
+	}
+	if pointInRect(x, y, menuBtnX, joinBtnY, menuBtnW, joinBtnH) {
+		return ModeActionJoin
+	}
+	return ModeActionNone
+}
+
+func (r *Renderer) DrawModeSelect(screen *ebiten.Image, addrInput string, port int, errMsg string) {
+	screen.Fill(color.RGBA{16, 16, 24, 255})
+
+	// Декоративная рамка сцены
+	vector.StrokeRect(screen, 16, 16, core.ArenaWidth-32, core.ArenaHeight-32, 2.0, color.RGBA{55, 65, 95, 255}, false)
+
+	r.drawTextCentered(
+		screen,
+		r.tr("САУНДЧЕК В 19:59", "SOUNDCHECK AT 19:59"),
+		core.ArenaWidth/2, 115, r.faceHeading, color.RGBA{90, 215, 255, 255},
+	)
+	r.drawTextCentered(
+		screen,
+		r.tr("Кооперативный музыкальный рогалик (1–2 игрока)", "Co-op Music Roguelike (1–2 Players)"),
+		core.ArenaWidth/2, 152, r.faceNormal, color.RGBA{200, 210, 235, 255},
+	)
+
+	cx, cy := ebiten.CursorPosition()
+
+	// Кнопка ХОСТ
+	hostFill := color.RGBA{26, 36, 56, 255}
+	hostBorder := color.RGBA{75, 195, 255, 255}
+	if pointInRect(float64(cx), float64(cy), menuBtnX, hostBtnY, menuBtnW, hostBtnH) {
+		hostFill = color.RGBA{38, 56, 86, 255}
+		hostBorder = color.RGBA{145, 225, 255, 255}
+	}
+	vector.DrawFilledRect(screen, menuBtnX, hostBtnY, menuBtnW, hostBtnH, hostFill, false)
+	vector.StrokeRect(screen, menuBtnX, hostBtnY, menuBtnW, hostBtnH, 2.5, hostBorder, false)
+	r.drawTextCentered(
+		screen,
+		r.tr("СОЗДАТЬ ИГРУ (ХОСТ)", "HOST GAME"),
+		core.ArenaWidth/2, float64(hostBtnY)+12, r.faceTitle, color.RGBA{240, 248, 255, 255},
+	)
+	r.drawTextCentered(
+		screen,
+		fmt.Sprintf(r.tr("Соло или кооператив • Порт :%d", "Solo or Co-op • Port :%d"), port),
+		core.ArenaWidth/2, float64(hostBtnY)+37, r.faceSmall, color.RGBA{175, 205, 235, 255},
+	)
+
+	// Поле ввода адреса хоста
+	r.drawTextCentered(
+		screen,
+		r.tr("Адрес хоста (IP:PORT) для подключения:", "Host address (IP:PORT) to join:"),
+		core.ArenaWidth/2, float64(addrBoxY)-22, r.faceSmall, color.RGBA{185, 195, 220, 255},
+	)
+	vector.DrawFilledRect(screen, menuBtnX, addrBoxY, menuBtnW, addrBoxH, color.RGBA{22, 24, 36, 255}, false)
+	vector.StrokeRect(screen, menuBtnX, addrBoxY, menuBtnW, addrBoxH, 1.5, color.RGBA{105, 120, 160, 255}, false)
+	r.drawTextCentered(
+		screen,
+		addrInput+"_",
+		core.ArenaWidth/2, float64(addrBoxY)+12, r.faceNormal, color.RGBA{255, 240, 160, 255},
+	)
+
+	// Кнопка ПОДКЛЮЧИТЬСЯ
+	joinFill := color.RGBA{26, 44, 36, 255}
+	joinBorder := color.RGBA{85, 235, 145, 255}
+	if pointInRect(float64(cx), float64(cy), menuBtnX, joinBtnY, menuBtnW, joinBtnH) {
+		joinFill = color.RGBA{38, 66, 52, 255}
+		joinBorder = color.RGBA{145, 255, 190, 255}
+	}
+	vector.DrawFilledRect(screen, menuBtnX, joinBtnY, menuBtnW, joinBtnH, joinFill, false)
+	vector.StrokeRect(screen, menuBtnX, joinBtnY, menuBtnW, joinBtnH, 2.5, joinBorder, false)
+	r.drawTextCentered(
+		screen,
+		r.tr("ПОДКЛЮЧИТЬСЯ К ИГРЕ (КЛИЕНТ)", "JOIN GAME (CLIENT)"),
+		core.ArenaWidth/2, float64(joinBtnY)+12, r.faceTitle, color.RGBA{240, 255, 245, 255},
+	)
+	r.drawTextCentered(
+		screen,
+		r.tr("Введите IP друга выше и нажмите сюда", "Enter friend's IP above and click here"),
+		core.ArenaWidth/2, float64(joinBtnY)+37, r.faceSmall, color.RGBA{175, 225, 195, 255},
+	)
+
+	if errMsg != "" {
+		r.drawTextCentered(screen, errMsg, core.ArenaWidth/2, 520, r.faceNormal, color.RGBA{255, 95, 110, 255})
+	}
+
+	r.drawLangButton(screen)
+}
+
 func (r *Renderer) DrawConnecting(screen *ebiten.Image, netStatus string) {
 	screen.Fill(color.RGBA{16, 16, 24, 255})
 	r.drawTextCentered(
